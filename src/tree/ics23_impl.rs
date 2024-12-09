@@ -15,6 +15,7 @@ fn sparse_merkle_proof_to_ics23_existence_proof<H: SimpleHasher>(
     key: Vec<u8>,
     value: Vec<u8>,
     proof: &SparseMerkleProof<H>,
+    spec: ics23::ProofSpec,
 ) -> ics23::ExistenceProof {
     let key_hash: KeyHash = KeyHash::with::<H>(key.as_slice());
     let mut path = Vec::new();
@@ -50,7 +51,10 @@ fn sparse_merkle_proof_to_ics23_existence_proof<H: SimpleHasher>(
                     (prefix, suffix)
                 };
                 path.push(ics23::InnerOp {
-                    hash: ics23::HashOp::Sha256.into(),
+                    hash: spec
+                        .clone()
+                        .inner_spec
+                        .map_or(ics23::HashOp::NoHash.into(), |spec| spec.hash.into()),
                     prefix,
                     suffix,
                 });
@@ -64,9 +68,17 @@ fn sparse_merkle_proof_to_ics23_existence_proof<H: SimpleHasher>(
         value,
         path,
         leaf: Some(ics23::LeafOp {
-            hash: ics23::HashOp::Sha256.into(),
-            prehash_key: ics23::HashOp::Sha256.into(),
-            prehash_value: ics23::HashOp::Sha256.into(),
+            hash: spec
+                .clone()
+                .leaf_spec
+                .map_or(ics23::HashOp::NoHash.into(), |spec| spec.hash.into()),
+            prehash_key: spec
+                .clone()
+                .leaf_spec
+                .map_or(ics23::HashOp::NoHash.into(), |spec| spec.prehash_key.into()),
+            prehash_value: spec.leaf_spec.map_or(ics23::HashOp::NoHash.into(), |spec| {
+                spec.prehash_value.into()
+            }),
             length: ics23::LengthOp::NoPrefix.into(),
             prefix: LEAF_DOMAIN_SEPARATOR.to_vec(),
         }),
@@ -83,6 +95,7 @@ where
         key: Vec<u8>,
         version: Version,
         proof: &ExclusionProof<H>,
+        spec: ics23::ProofSpec,
     ) -> Result<ics23::NonExistenceProof> {
         match proof {
             ExclusionProof::Leftmost {
@@ -105,6 +118,7 @@ where
                     key_left_proof.clone(),
                     value.clone(),
                     leftmost_right_proof,
+                    spec,
                 );
 
                 Ok(ics23::NonExistenceProof {
@@ -132,6 +146,7 @@ where
                     key_leftmost.clone(),
                     value_leftmost.clone(),
                     leftmost_right_proof,
+                    spec.clone(),
                 );
 
                 let rightmost_key_hash = rightmost_left_proof
@@ -149,6 +164,7 @@ where
                     key_rightmost.clone(),
                     value_rightmost.clone(),
                     rightmost_left_proof,
+                    spec,
                 );
 
                 Ok(ics23::NonExistenceProof {
@@ -175,6 +191,7 @@ where
                     key_rightmost.clone(),
                     value_rightmost.clone(),
                     rightmost_left_proof,
+                    spec,
                 );
 
                 Ok(ics23::NonExistenceProof {
@@ -193,6 +210,7 @@ where
         &self,
         key: Vec<u8>,
         version: Version,
+        spec: ics23::ProofSpec,
     ) -> Result<(Option<OwnedValue>, ics23::CommitmentProof)> {
         let key_hash: KeyHash = KeyHash::with::<H>(key.as_slice());
         let proof_or_exclusion = self.get_with_exclusion_proof(key_hash, version)?;
@@ -200,7 +218,7 @@ where
         match proof_or_exclusion {
             Ok((value, proof)) => {
                 let ics23_exist =
-                    sparse_merkle_proof_to_ics23_existence_proof(key, value.clone(), &proof);
+                    sparse_merkle_proof_to_ics23_existence_proof(key, value.clone(), &proof, spec);
 
                 Ok((
                     Some(value),
@@ -214,6 +232,7 @@ where
                     key,
                     version,
                     &exclusion_proof,
+                    spec,
                 )?;
 
                 Ok((
@@ -227,17 +246,17 @@ where
     }
 }
 
-pub fn ics23_spec() -> ics23::ProofSpec {
+pub fn ics23_spec(hash_op: ics23::HashOp) -> ics23::ProofSpec {
     ics23::ProofSpec {
         leaf_spec: Some(ics23::LeafOp {
-            hash: ics23::HashOp::Sha256.into(),
-            prehash_key: ics23::HashOp::Sha256.into(),
-            prehash_value: ics23::HashOp::Sha256.into(),
+            hash: hash_op.into(),
+            prehash_key: hash_op.into(),
+            prehash_value: hash_op.into(),
             length: ics23::LengthOp::NoPrefix.into(),
             prefix: LEAF_DOMAIN_SEPARATOR.to_vec(),
         }),
         inner_spec: Some(ics23::InnerSpec {
-            hash: ics23::HashOp::Sha256.into(),
+            hash: hash_op.into(),
             child_order: vec![0, 1],
             min_prefix_length: INTERNAL_DOMAIN_SEPARATOR.len() as i32,
             max_prefix_length: INTERNAL_DOMAIN_SEPARATOR.len() as i32,
@@ -318,7 +337,7 @@ mod tests {
             // e.g.  0x5 -> 0x4 and 0x6
             let (smaller_key, bigger_key) = generate_adjacent_keys(existing_key);
 
-            let (v, proof) = tree.get_with_ics23_proof(smaller_key.as_bytes().to_vec(), 1).expect("can query tree");
+            let (v, proof) = tree.get_with_ics23_proof(smaller_key.as_bytes().to_vec(), 1, ics23_spec(ics23::HashOp::Sha256)).expect("can query tree");
             assert!(v.is_none(), "the key should not exist!");
             let proof = proof.proof.expect("a proof is present");
             if let Proof::Nonexist(NonExistenceProof { key, left, right }) = proof {
@@ -339,7 +358,7 @@ mod tests {
                 unreachable!("we have assessed that the value is `None`")
             }
 
-            let (v, proof) = tree.get_with_ics23_proof(bigger_key.as_bytes().to_vec(), 1).expect("can query tree");
+            let (v, proof) = tree.get_with_ics23_proof(bigger_key.as_bytes().to_vec(), 1, ics23_spec(ics23::HashOp::Sha256)).expect("can query tree");
             assert!(v.is_none(), "the key should not exist!");
             let proof = proof.proof.expect("a proof is present");
             if let Proof::Nonexist(NonExistenceProof { key, left, right }) = proof {
@@ -404,8 +423,10 @@ mod tests {
         let (new_root_hash, batch) = tree.put_value_set(kvs, 0).unwrap();
         db.write_tree_update_batch(batch).unwrap();
 
-        let (value_retrieved, commitment_proof) =
-            tree.get_with_ics23_proof(b"notexist".to_vec(), 0).unwrap();
+        let spec = ics23_spec(ics23::HashOp::Sha256);
+        let (value_retrieved, commitment_proof) = tree
+            .get_with_ics23_proof(b"notexist".to_vec(), 0, spec.clone())
+            .unwrap();
 
         let key_hash = KeyHash::with::<Sha256>(b"notexist".as_slice());
         let proof_or_exclusion = tree.get_with_exclusion_proof(key_hash, 0).unwrap();
@@ -427,7 +448,7 @@ mod tests {
 
                     assert!(ics23::verify_non_membership::<HostFunctionsManager>(
                         &commitment_proof,
-                        &ics23_spec(),
+                        &spec,
                         &new_root_hash.0.to_vec(),
                         b"notexist"
                     ));
@@ -447,7 +468,7 @@ mod tests {
 
                     assert!(ics23::verify_non_membership::<HostFunctionsManager>(
                         &commitment_proof,
-                        &ics23_spec(),
+                        &spec,
                         &new_root_hash.0.to_vec(),
                         b"notexist"
                     ));
@@ -476,7 +497,7 @@ mod tests {
 
                     assert!(ics23::verify_non_membership::<HostFunctionsManager>(
                         &commitment_proof,
-                        &ics23_spec(),
+                        &spec,
                         &new_root_hash.0.to_vec(),
                         b"notexist"
                     ));
@@ -488,7 +509,7 @@ mod tests {
 
         assert!(!ics23::verify_non_membership::<HostFunctionsManager>(
             &commitment_proof,
-            &ics23_spec(),
+            &spec,
             &new_root_hash.0.to_vec(),
             b"key",
         ));
@@ -501,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn test_jmt_ics23_existence() {
+    fn test_jmt_ics23_existence_sha256() {
         let db = MockTreeStore::default();
         let tree = JellyfishMerkleTree::<_, Sha256>::new(&db);
 
@@ -521,12 +542,51 @@ mod tests {
         let (new_root_hash, batch) = tree.put_value_set(kvs, 0).unwrap();
         db.write_tree_update_batch(batch).unwrap();
 
-        let (value_retrieved, commitment_proof) =
-            tree.get_with_ics23_proof(b"key".to_vec(), 0).unwrap();
+        let (value_retrieved, commitment_proof) = tree
+            .get_with_ics23_proof(b"key".to_vec(), 0, ics23_spec(ics23::HashOp::Sha256))
+            .unwrap();
 
         assert!(ics23::verify_membership::<HostFunctionsManager>(
             &commitment_proof,
-            &ics23_spec(),
+            &ics23_spec(ics23::HashOp::Sha256),
+            &new_root_hash.0.to_vec(),
+            b"key",
+            b"value",
+        ));
+
+        assert_eq!(value_retrieved.unwrap(), b"value");
+    }
+
+    #[cfg(feature = "blake3_tests")]
+    #[test]
+    fn test_jmt_ics23_existence_blake3() {
+        let db = MockTreeStore::default();
+        let tree = JellyfishMerkleTree::<_, blake3::Hasher>::new(&db);
+
+        let key = b"key";
+        let key_hash = KeyHash::with::<blake3::Hasher>(&key);
+
+        // For testing, insert multiple values into the tree
+        let mut kvs = Vec::new();
+        kvs.push((key_hash, Some(b"value".to_vec())));
+        // make sure we have some sibling nodes, through carefully constructed k/v entries that will have overlapping paths
+        for i in 1..4 {
+            let mut overlap_key = KeyHash([0; 32]);
+            overlap_key.0[0..i].copy_from_slice(&key_hash.0[0..i]);
+            kvs.push((overlap_key, Some(b"bogus value".to_vec())));
+        }
+
+        let (new_root_hash, batch) = tree.put_value_set(kvs, 0).unwrap();
+        db.write_tree_update_batch(batch).unwrap();
+
+        let spec = ics23_spec(ics23::HashOp::Blake3);
+        let (value_retrieved, commitment_proof) = tree
+            .get_with_ics23_proof(b"key".to_vec(), 0, spec.clone())
+            .unwrap();
+
+        assert!(ics23::verify_membership::<HostFunctionsManager>(
+            &commitment_proof,
+            &spec,
             &new_root_hash.0.to_vec(),
             b"key",
             b"value",
@@ -554,14 +614,18 @@ mod tests {
         let value_maxversion = format!("value{}", MAX_VERSION).into_bytes();
 
         let (value_retrieved, commitment_proof) = tree
-            .get_with_ics23_proof(format!("key{}", MAX_VERSION).into_bytes(), MAX_VERSION)
+            .get_with_ics23_proof(
+                format!("key{}", MAX_VERSION).into_bytes(),
+                MAX_VERSION,
+                ics23_spec(ics23::HashOp::Sha256),
+            )
             .unwrap();
 
         let root_hash = tree.get_root_hash(MAX_VERSION).unwrap().0.to_vec();
 
         assert!(ics23::verify_membership::<HostFunctionsManager>(
             &commitment_proof,
-            &ics23_spec(),
+            &ics23_spec(ics23::HashOp::Sha256),
             &root_hash,
             format!("key{}", MAX_VERSION).as_bytes(),
             format!("value{}", MAX_VERSION).as_bytes(),
@@ -573,7 +637,7 @@ mod tests {
     #[test]
     /// Write four keys into the JMT, and query an ICS23 proof for a nonexistent
     /// key. This reproduces a bug that was fixed in release `0.8.0`
-    fn test_jmt_ics23_nonexistence_simple() {
+    fn test_jmt_ics23_nonexistence_simple_sha256() {
         use crate::Sha256Jmt;
         let db = MockTreeStore::default();
         let tree = Sha256Jmt::new(&db);
@@ -600,7 +664,50 @@ mod tests {
                 .expect("can insert node batch");
         }
         let (_value_retrieved, _commitment_proof) = tree
-            .get_with_ics23_proof(format!("does_not_exist").into_bytes(), MAX_VERSION)
+            .get_with_ics23_proof(
+                format!("does_not_exist").into_bytes(),
+                MAX_VERSION,
+                ics23_spec(ics23::HashOp::Sha256),
+            )
+            .unwrap();
+    }
+
+    #[cfg(feature = "blake3_tests")]
+    #[test]
+    /// Write four keys into the JMT, and query an ICS23 proof for a
+    /// nonexistent key. Use the blake3 hasher and specify it on the ics23
+    /// spec.
+    fn test_jmt_ics23_nonexistence_simple_blake3() {
+        let db = MockTreeStore::default();
+        let tree = JellyfishMerkleTree::<_, blake3::Hasher>::new(&db);
+
+        const MAX_VERSION: u64 = 3;
+
+        for version in 0..=MAX_VERSION {
+            let key_str = format!("key-{}", version);
+            let key = key_str.clone().into_bytes();
+            let value_str = format!("value-{}", version);
+            let value = value_str.clone().into_bytes();
+            let keys = vec![key.clone()];
+            let values = vec![value];
+            let value_set = keys
+                .into_iter()
+                .zip(values.into_iter())
+                .map(|(k, v)| (KeyHash::with::<blake3::Hasher>(&k), Some(v)))
+                .collect::<Vec<_>>();
+            let key_hash = KeyHash::with::<blake3::Hasher>(&key);
+
+            db.put_key_preimage(key_hash, &key);
+            let (_root, batch) = tree.put_value_set(value_set, version).unwrap();
+            db.write_tree_update_batch(batch)
+                .expect("can insert node batch");
+        }
+        let (_value_retrieved, _commitment_proof) = tree
+            .get_with_ics23_proof(
+                format!("does_not_exist").into_bytes(),
+                MAX_VERSION,
+                ics23_spec(ics23::HashOp::Blake3),
+            )
             .unwrap();
     }
 
@@ -636,7 +743,11 @@ mod tests {
 
         for version in 0..=MAX_VERSION {
             let (_value_retrieved, _commitment_proof) = tree
-                .get_with_ics23_proof(format!("does_not_exist").into_bytes(), version)
+                .get_with_ics23_proof(
+                    format!("does_not_exist").into_bytes(),
+                    version,
+                    ics23_spec(ics23::HashOp::Sha256),
+                )
                 .unwrap();
         }
     }
@@ -679,7 +790,11 @@ mod tests {
 
         let nonexisting_key = prefix_pad("c3");
         let (_value_retrieved, _commitment_proof) = tree
-            .get_with_ics23_proof(nonexisting_key.to_vec(), MAX_VERSION)
+            .get_with_ics23_proof(
+                nonexisting_key.to_vec(),
+                MAX_VERSION,
+                ics23_spec(ics23::HashOp::Sha256),
+            )
             .unwrap();
     }
 
